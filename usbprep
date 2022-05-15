@@ -1,0 +1,107 @@
+#!/bin/sh
+
+# help
+if [ -z "${1}" ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    echo "Extract an iso/image archive directly to a blockdevice,"
+    echo "like USB-sticks or SD-cards."
+    echo "Additionaly copy SSH-keys to Raspberry Pi's"
+    echo ""
+    echo "Usage:"
+    echo "List USB devices: usbprep -l, --list"
+    echo "Flash with image: usbprep <archive_file> <blockdevice>"
+    echo "Copy SSH-key: usbprep -k, --ssh-key <blockdevice>"
+    echo ""
+    echo "Example use: usbprep Raspbian_11.zip /dev/sdx"
+    exit 0
+fi
+
+# list devices
+if [ "$1" = "-l" ] || [ "$1" = "--list" ]; then
+    # get list of removabe devices
+    USBKEYS=$(
+        grep -Hv ^0$ /sys/block/*/removable |
+            sed s/removable:.*$/device\\/uevent/ |
+            xargs grep -H ^DRIVER=sd |
+            sed s/device.uevent.*$/size/ |
+            xargs grep -Hv ^0$ |
+            cut -d / -f 4
+    )
+
+    # list devices
+    for i in $USBKEYS; do
+        DEVICE_VENDOR=$(cat /sys/block/"$i"/device/vendor)
+        DEVICE_NAME=$(cat /sys/block/"$i"/device/model)
+        DEVICE_SIZE=$(lsblk -d -n -o SIZE /dev/"$i")
+        echo "$i $DEVICE_SIZE $DEVICE_VENDOR$DEVICE_NAME"
+    done
+
+    exit 0
+fi
+
+if [ -z "${2}" ]; then
+    echo "You need to enter a target blockdevice, like /dev/sdx"
+    exit 1
+fi
+
+FLASH_STORAGE=$2
+
+# install current users authorized_key to Debian Raspberry Pi
+if [ "$1" = "-k" ] || [ "$1" = "--ssh-key" ]; then
+    # mount
+    udisksctl mount -b "$FLASH_STORAGE""1"
+    wait
+
+    # shellcheck disable=SC2002
+    SD_PATH=$(cat /proc/mounts | grep "$FLASH_STORAGE" | awk '{print $2}')
+    CFG_FILE_DEBIAN="$SD_PATH/sysconf.txt"
+    CFG_FILE_RASPBIAN="$SD_PATH/config.txt"
+    SSHKEY=$(cat .ssh/id_rsa.pub || exit 1)
+
+    # debian
+    KEY_VAR="#root_authorized_key="
+    if grep -Fxq "$KEY_VAR" "$CFG_FILE_DEBIAN"; then
+        echo "Detected Debian, installing keys"
+        sed -i "s|$KEY_VAR|root_authorized_key=$SSHKEY|g" "$CFG_FILE_DEBIAN"
+    # raspbian
+    elif grep -Fxq "# http://rpf.io/configtxt" "$CFG_FILE_RASPBIAN"; then
+        echo "Detected Raspbian, enabling ssh with default credentials"
+        touch "$SD_PATH/ssh"
+        echo "Enable hdmi_force_hotplug"
+        sed -i "s|#hdmi_force_hotplug=1|hdmi_force_hotplug=1|g" "$CFG_FILE_RASPBIAN"
+    else
+        echo "Can't set key, already set?"
+    fi
+
+    # unmount everything
+    udisksctl unmount -b "$FLASH_STORAGE"?*
+    wait
+
+    exit 0
+fi
+
+# must run as root
+if [ "$(id -u)" -ne 0 ]; then
+    echo 'This script must be run as root!' >&2
+    exit 1
+fi
+
+ARCHIVE=$1
+
+# unmount all partitions
+udisksctl unmount -fb "$FLASH_STORAGE"?*
+wait
+
+# find compression type
+FILE_TYPE=$(file "$ARCHIVE")
+
+# extract and flash
+if echo "$FILE_TYPE" | grep -q "XZ compressed"; then
+    unxz -v --stdout --threads=0 "$ARCHIVE" |
+        dd of="$FLASH_STORAGE" bs=1M status=progress || exit 1
+elif echo "$FILE_TYPE" | grep -q "Zip archive"; then
+    unzip -p "$ARCHIVE" |
+        dd of="$FLASH_STORAGE" bs=1M status=progress || exit 1
+fi
+
+udisksctl unmount -b "$FLASH_STORAGE"?*
+wait
