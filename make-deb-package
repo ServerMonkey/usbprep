@@ -15,13 +15,18 @@ VERSION="$VERSION_MAJOR.$VERSION_MINOR_NEW"
 
 # variables
 NAME="usbprep"
+README="README.md"
 RELEASES="releases"
 TARGET="DEBIAN"
+MAN_PAGE=1
+FILE_MAN="$NAME.$MAN_PAGE"
 PATH_BASE="./$RELEASES/$NAME-$VERSION"
 PATH_INSTALL="$PATH_BASE/usr/local"
+PATH_BASH_COMP="$PATH_BASE/usr/share/bash-completion/completions"
 PATH_BIN="$PATH_INSTALL/bin"
 PATH_SHARE="$PATH_INSTALL/share/$NAME"
 PATH_TARGET="$PATH_BASE/$TARGET"
+PATH_MAN="$PATH_INSTALL/share/man/man$MAN_PAGE"
 
 # delete the old build
 echo "Cleaning up old build"
@@ -29,11 +34,15 @@ rm -rf "$PATH_BASE"
 
 # copy relevant files from source to release
 echo "Copying relevant source files"
-mkdir -p "$PATH_SHARE"
-cp -t "$PATH_SHARE" "README.md" "copyright" || exit 1
-mkdir -p "$PATH_BIN"
-chmod 0755 "usbprep"
-cp -t "$PATH_BIN" "usbprep" || exit 1
+mkdir -p "$PATH_SHARE" "$PATH_BASH_COMP" "$PATH_BIN" "$PATH_MAN"
+cp -t "$PATH_SHARE" "$README" "copyright" || exit 1
+chmod 0755 "usbprep-pi" "usbprep-ventoy"
+cp -t "$PATH_BIN" "usbprep-pi" "usbprep-ventoy" || exit 1
+cp -t "$PATH_BASH_COMP" "bash_completion/usbprep-pi" \
+    "bash_completion/usbprep-ventoy" || exit 1
+
+# build man page
+ronn -r <"$README" | gzip -9n >"$PATH_MAN/$FILE_MAN" || exit 1
 
 # create Debian control file
 echo "Creating CONTROL file"
@@ -43,7 +52,7 @@ Version: $VERSION
 Section: net
 Priority: optional
 Architecture: all
-Depends: udisks2
+Depends: udisks2, rsync
 Maintainer: Bodo Endres <dev@muspekaren.se>
 Description: Extract an iso/image archive directly to a blockdevice
 " >"$PATH_TARGET/control"
@@ -61,8 +70,10 @@ zip -q -r "$RELEASES/$NAME-$VERSION.source.zip" ./* \
 wait
 
 # replace latest version
-cp "$PATH_BASE.deb" "$RELEASES/$NAME-LATEST.deb"
-cp "$PATH_BASE.source.zip" "$RELEASES/$NAME-LATEST-source.zip"
+cd "$RELEASES" || exit 1
+ln -sf "$NAME-$VERSION.deb" "$NAME-LATEST.deb"
+ln -sf "$NAME-$VERSION.source.zip" "$NAME-LATEST.source.zip"
+cd "$APP_DIR" || exit 1
 
 # clean up
 echo "Clean up"

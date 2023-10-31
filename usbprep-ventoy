@@ -1,0 +1,343 @@
+#!/bin/sh
+#info: Crate a bootable USB-stick with Ventoy from a list of images
+# shellcheck disable=SC2039
+
+# abort on errors
+set -e
+
+# must run as normal user
+if [ "$(id -u)" = 0 ]; then
+    echo 'This script must be run as a normal user, not root!' >&2
+    exit 1
+fi
+
+### STATIC VARIABLES ##########################################################
+
+BINS_VENTOY="Ventoy2Disk.sh ventoy2disk"
+BINS_PLUGSON="VentoyPlugson.sh ventoyplugson"
+SEARCH_PATH="/opt /var/opt /usr/local/bin"
+DIR_CFG="$HOME/.ventoy"
+IMAGES="$DIR_CFG/images.txt"
+VENTOY_JSON="$DIR_CFG/ventoy.json"
+
+### GLOBAL VARIABLES ##########################################################
+
+DEVICE=""
+DEVICE_P1=""
+DEVICE_PATH=""
+
+### FUNCTIONS #################################################################
+
+error() {
+    echo "$1" >&2
+    [ -f "$LIST_TO_DL" ] && rm -f "$LIST_TO_DL"
+    [ -f "$LIST_TO_CP" ] && rm -f "$LIST_TO_CP"
+    exit 1
+}
+
+mount_ventoy() {
+    echo "Mounting $DEVICE_P1..."
+    udisksctl mount -b "$DEVICE_P1" || error "Failed to mount $DEVICE_P1"
+    DEVICE_PATH=$(grep "$DEVICE_P1" </proc/mounts | awk '{print $2}')
+    [ -n "$DEVICE_PATH" ] || error "Failed to find device path for $DEVICE"
+}
+
+unmount_ventoy() {
+    local PROCESSES
+    local PID
+    local UNMOUNT_RESULT
+
+    if ! findmnt "$DEVICE_P1" 1>/dev/null 2>&1; then
+        echo "Already unmounted $DEVICE_P1"
+        return 0
+    fi
+
+    echo "Unmounting $DEVICE_P1..."
+
+    # shellcheck disable=SC2009
+    PROCESSES=$(ps aux | grep -i -- "Plugson 127.0.0.1" | grep -v grep |
+        awk '{print $2}')
+    for PID in $PROCESSES; do
+        echo "Closing Plugson process: $PID"
+        sudo kill -9 "$PID" 1>/dev/null 2>&1
+    done
+
+    sync
+
+    UNMOUNT_RESULT=$(udisksctl unmount -b "$DEVICE_P1") || exit 1
+    if echo "$UNMOUNT_RESULT" | grep -qF "target is busy"; then
+        echo "Device is busy, listing processes you need to close"
+        sudo lsof "$DEVICE_P1"
+    fi
+    sync
+}
+
+list_devices() {
+    local BLOCK_DEVICES
+    local DEVICE_VENDOR
+    local DEVICE_NAME
+    local DEVICE_SIZE
+
+    # get a list of removable devices like USB-sticks and SD-cards
+    BLOCK_DEVICES=$(
+        grep -Hv "^0$" "/sys/block/"*"/removable" |
+            sed 's@removable:.*$@device/uevent@' |
+            xargs grep -H "^DRIVER=sd" |
+            sed 's@device.uevent.*$@size@' |
+            xargs grep -Hv "^0$" |
+            cut -d / -f 4
+    )
+
+    if [ -z "$BLOCK_DEVICES" ]; then
+        echo "No removable devices found, please insert a USB-stick or SD-card"
+        exit 0
+    fi
+
+    # list devices
+    for i in $BLOCK_DEVICES; do
+        DEVICE_VENDOR=$(cat /sys/block/"$i"/device/vendor)
+        DEVICE_NAME=$(cat /sys/block/"$i"/device/model)
+        DEVICE_SIZE=$(lsblk -d -n -o SIZE /dev/"$i")
+        echo "$i $DEVICE_SIZE $DEVICE_VENDOR$DEVICE_NAME"
+    done
+}
+
+find_bin() {
+    local BIN
+
+    # try to find a ventoy binary
+    for i in $1; do
+        for j in $SEARCH_PATH; do
+            BIN=$(find "$j" -name "$i" -type f 2>/dev/null | sort | tail -n 1)
+            if [ -n "$BIN" ]; then
+                echo "$BIN"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+fastpkg_download() {
+    local PKG_INFO
+    local DL_PATH
+
+    echo "--- Downloading packages..."
+
+    while read -r line; do
+        PKG_INFO=$(fastpkg -p "$line" show) ||
+            error "Failed to find package $line"
+
+        if echo "$PKG_INFO" | grep -qF "Downloaded: Yes"; then
+            :
+        else
+            sudo fastpkg -p "$line" download
+        fi
+        DL_PATH=$(fastpkg -p "$line" show -d) ||
+            error "Failed to find download path for: $line"
+        echo "add to copy list: $DL_PATH"
+        echo "$DL_PATH" >>"$LIST_TO_CP"
+    done <"$LIST_TO_DL"
+}
+
+calculate_space() {
+    local FILE_SIZE
+    local TOTAL_SIZE=0
+    local DISK_FREE=0
+    local DEST_FILE
+
+    echo "--- Calculating space needed..."
+
+    DISK_FREE=$(df "$DEVICE_P1" --output=avail | tail -n1)
+    [ -n "$DISK_FREE" ] || error "Failed to get disk size for $DEVICE_P1"
+
+    while read -r line; do
+        DEST_FILE=$(basename "$line")
+        if [ -f "$DEVICE_PATH/$DEST_FILE" ]; then
+            echo "exclude from calculating, already exists: $DEST_FILE"
+        else
+            FILE_SIZE=$(du -Hs "$line" | awk '{print $1}')
+            [ -n "$FILE_SIZE" ] || error "Failed to get file size for $line"
+            [ "$FILE_SIZE" -ne "0" ] || error "Failed to get file size for $line"
+            TOTAL_SIZE=$((TOTAL_SIZE + FILE_SIZE)) || error "Failed to add sizes"
+            [ -n "$TOTAL_SIZE" ] || error "Failed to add sizes"
+            [ "$TOTAL_SIZE" -ne "0" ] || error "Failed to add sizes"
+        fi
+    done <"$LIST_TO_CP"
+
+    TO_GB=$((1024 * 1024))
+    TO_MB=1024
+    TOTAL_SIZE_GB=$((TOTAL_SIZE / TO_GB))
+    TOTAL_SIZE_MB=$((TOTAL_SIZE / TO_MB))
+    DISK_FREE_GB=$((DISK_FREE / TO_GB))
+    DISK_FREE_MB=$((DISK_FREE / TO_MB))
+
+    echo "Total files: $TOTAL_SIZE_GB GB ($TOTAL_SIZE_MB MB)"
+    echo "Disk free: $DISK_FREE_GB GB ($DISK_FREE_MB MB)"
+
+    # abort if not enough free space, convert to GB
+    if [ "$TOTAL_SIZE" -gt "$DISK_FREE" ]; then
+        echo "Aborting, not enough disk space on $DEVICE_P1"
+        exit 1
+    fi
+}
+
+copy_files() {
+    local DEST_FILE
+
+    while read -r line; do
+        DEST_FILE=$(basename "$line")
+        rsync -tP "$line" "$DEVICE_PATH/$DEST_FILE" ||
+            error "Failed to copy $line"
+        sync
+    done <"$LIST_TO_CP"
+}
+
+curate_fastpkg_images() {
+    local ISOS
+    local FPKG_NAME
+
+    echo "--- Curating fastpkg images..."
+
+    # get a list of all images in ventoy.json
+    ISOS=$(grep 'image\":' "$VENTOY_JSON" | awk '{print $2}' | tr -d '/",')
+    [ -n "$ISOS" ] || echo "skip, no image paths in $VENTOY_JSON"
+
+    # download all fastpkg images
+    for k in $ISOS; do
+        FPKG_NAME="${k%.*}"
+        if [ -f "$IMAGES" ] && grep -qF "$k" "$IMAGES"; then
+            echo "skip, already in image list: $FPKG_NAME"
+        else
+            echo "add to download list: $FPKG_NAME"
+            echo "$FPKG_NAME" >>"$LIST_TO_DL"
+        fi
+    done
+}
+
+curate_custom_images() {
+    echo "--- Curating custom images..."
+
+    while read -r line; do
+        if echo "$line" | grep -q '/'; then
+            [ -f "$line" ] || error "Failed to find disk image: $line"
+            echo "add to copy list: $line"
+            echo "$line" >>"$LIST_TO_CP"
+        else
+            echo "add to download list: $line"
+            echo "$line" >>"$LIST_TO_DL"
+        fi
+    done <"$IMAGES"
+}
+
+### ARGUMENTS #################################################################
+
+# help
+if [ -z "$1" ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    man usbprep.1 || ronn -r <README.md | man -l -
+    exit
+elif [ "$1" = "list" ] || [ "$1" = "l" ]; then
+    list_devices
+    exit 0
+fi
+
+# block device
+if [ -n "$2" ]; then
+    DEVICE="/dev/$2"
+    test -b "$DEVICE" || error "$DEVICE is not a block device"
+    DEVICE_P1="$DEVICE""1"
+else
+    error "No block device specified"
+fi
+
+# action to take
+if [ "$1" = "plugson" ] || [ "$1" = "p" ]; then
+    PLUGSON_EXE=$(find_bin "$BINS_PLUGSON") ||
+        error "Failed to find ventoyplugson"
+    unmount_ventoy || true
+    mount_ventoy
+    if ! sudo true "$USER"; then
+        error 'The user is unable to become root!' >&2
+    fi
+    # find path to plugson
+    OLD_DIR=$(pwd)
+    PLUGSON_DIR=$(dirname "$PLUGSON_EXE")
+    cd "$PLUGSON_DIR" || error "Failed to cd to $PLUGSON_DIR"
+    sudo sh "$PLUGSON_EXE" -P 24681 "$DEVICE" 1>/dev/null &
+    cd "$OLD_DIR"
+    URL="http://localhost:24681/#plugson_auto_install"
+    sleep 1
+    xdg-open "$URL" || error "Failed to open $URL"
+
+    while true; do
+        echo "Press 'q' to quit when you are done with Plugson"
+        # shellcheck disable=SC2162
+        read QUIT_PLUGSON </dev/tty
+        case $QUIT_PLUGSON in
+        q) break ;;
+        esac
+    done
+
+    unmount_ventoy
+    exit 0
+elif [ "$1" = "install" ] || [ "$1" = "i" ]; then
+    :
+else
+    error "Unknown command: $1"
+fi
+
+### MAIN ######################################################################
+
+echo "Syncing filesystems..."
+sync
+
+mkdir -p "$DIR_CFG"
+
+# install ventoy to device
+VENTOY_EXE=$(find_bin "$BINS_VENTOY") || error "Failed to find ventoy"
+sudo sh -c "$VENTOY_EXE -i $DEVICE" ||
+    error "Failed to install ventoy to $DEVICE"
+
+mount_ventoy
+
+if [ -f "$VENTOY_JSON" ]; then
+    echo "Copy Ventoy template files..."
+    rm -rf "$DEVICE_PATH/.Trash"*
+    rm -f "$DEVICE_PATH/ventoy/.*"
+    rsync -trp "$DIR_CFG/" "$DEVICE_PATH/ventoy" --exclude=".*" --delete ||
+        error "Failed to copy $DIR_CFG to $DEVICE_PATH"
+else
+    echo "skip copy Ventoy templates, no $VENTOY_JSON found"
+fi
+
+LIST_TO_DL=$(mktemp)
+LIST_TO_CP=$(mktemp)
+
+# copy custom images from images.txt
+if [ -f "$IMAGES" ]; then
+    curate_custom_images
+else
+    echo "skip custom images, no $IMAGES found"
+fi
+
+# download and copy img files from ventoy.json via fastpkg
+if command -v fastpkg >/dev/null 2>&1; then
+    if [ -f "$VENTOY_JSON" ]; then
+        curate_fastpkg_images
+        fastpkg_download
+    else
+        echo "skip fastpkg, no $VENTOY_JSON found"
+    fi
+else
+    echo "skip fastpkg, fastpkg not installed"
+fi
+
+if ! [ -f "$VENTOY_JSON" ] && ! [ -f "$IMAGES" ]; then
+    echo "skip copy images, no images to copy"
+else
+    calculate_space
+    copy_files
+fi
+
+unmount_ventoy
+echo "Done! You can now remove the device from your computer."

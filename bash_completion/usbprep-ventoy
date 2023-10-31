@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+complete -W "l list i install plugson -h --help sd" usbprep-ventoy

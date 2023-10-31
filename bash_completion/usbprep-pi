@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+complete -W "-k --ssh-key -h --help sd" usbprep-pi
