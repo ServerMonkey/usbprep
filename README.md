@@ -51,7 +51,9 @@ DEVICE is the block device to write to, like sdx (not /dev/sdx)
 * `list, l` : List USB devices
 * `install, i <DEVICE>` : Install Ventoy to a device and copy images from
   images.txt. Uses fastpkg if available.
-* `plugson <DEVICE>` : Start Ventoy PlugsOn on a device open in webbrowser
+* `ventoy, v <DEVICE>` : Only install Ventoy to a device. Will not copy
+  any images from images.txt.
+* `plugson, p <DEVICE>` : Start Ventoy PlugsOn on a device open in webbrowser
 
 ### usbprep-pi:
 

@@ -282,6 +282,8 @@ if [ "$1" = "plugson" ] || [ "$1" = "p" ]; then
     exit 0
 elif [ "$1" = "install" ] || [ "$1" = "i" ]; then
     :
+elif [ "$1" = "ventoy" ] || [ "$1" = "v" ]; then
+    :
 else
     error "Unknown command: $1"
 fi
@@ -297,8 +299,17 @@ mkdir -p "$DIR_CFG"
 VENTOY_EXE=$(find_bin "$BINS_VENTOY") || error "Failed to find ventoy"
 sudo sh -c "$VENTOY_EXE -i $DEVICE" ||
     error "Failed to install ventoy to $DEVICE"
+sync
+sleep 2
 
 mount_ventoy
+
+if [ "$1" = "ventoy" ] || [ "$1" = "v" ]; then
+    unmount_ventoy
+    echo "Only installed Ventoy, no images copied"
+    echo "Done! You can now remove the device from your computer."
+    exit 0
+fi
 
 if [ -f "$VENTOY_JSON" ]; then
     echo "Copy Ventoy template files..."

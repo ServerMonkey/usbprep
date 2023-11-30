@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-complete -W "l list i install plugson -h --help sd" usbprep-ventoy
+complete -W "l list i install v ventoy p plugson -h --help sd" usbprep-ventoy
