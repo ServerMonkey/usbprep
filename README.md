@@ -58,6 +58,7 @@ DEVICE is the block device to write to, like sdx (not /dev/sdx)
 ### usbprep-pi:
 
 * `-h, --help` : Displays this help screen
+* `--list, -l` : List USB devices
 * `usbprep-pi <ARCHIVE_FILE> <DEVICE>` : Flash with image
 * `usbprep-pi **-k|--ssh-key** <DEVICE>` : Copy SSH-key
 
@@ -83,6 +84,12 @@ It will automatically download the image via fastpkg.
 To create the stick just run:
 
     $ usbprep-ventoy i sdx
+
+You can even add other files or folders to the images.txt file.  
+Be mindful that these files will not be used to pre-calculate the size of the
+final device. Just make sure you have enough space on the usb device.
+
+Only the variable '$HOME' will be expanded.
 
 ### usbprep-pi:
 

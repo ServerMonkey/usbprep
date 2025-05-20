@@ -1,99 +1,161 @@
 #!/bin/sh
 
+set -e
+
 # help
 if [ -z "${1}" ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-	man usbprep.1 || ronn -r <README.md | man -l -
-	exit 0
+    man usbprep.1 || ronn -r <README.md | man -l -
+    exit 0
 fi
+
+error() {
+    echo "$1" >&2
+    exit 1
+}
 
 # list devices
 if [ "$1" = "-l" ] || [ "$1" = "--list" ]; then
-	# get list of removabe devices
-	USBKEYS=$(
-		grep -Hv "^0$" "/sys/block/"*"/removable" |
-			sed 's@removable:.*$@device/uevent@' |
-			xargs grep -H "^DRIVER=sd" |
-			sed 's@device.uevent.*$@size@' |
-			xargs grep -Hv "^0$" |
-			cut -d / -f 4
-	)
+    # get list of removabe devices
+    USBKEYS=$(
+        grep -Hv "^0$" "/sys/block/"*"/removable" |
+            sed 's@removable:.*$@device/uevent@' |
+            xargs grep -H "^DRIVER=sd" |
+            sed 's@device.uevent.*$@size@' |
+            xargs grep -Hv "^0$" |
+            cut -d / -f 4
+    )
+    [ -z "$USBKEYS" ] && error "No USB devices found"
 
-	# list devices
-	for i in $USBKEYS; do
-		DEVICE_VENDOR=$(cat /sys/block/"$i"/device/vendor)
-		DEVICE_NAME=$(cat /sys/block/"$i"/device/model)
-		DEVICE_SIZE=$(lsblk -d -n -o SIZE /dev/"$i")
-		echo "$i $DEVICE_SIZE $DEVICE_VENDOR$DEVICE_NAME"
-	done
+    SDCARDS=$(
+        grep -H "^SD$" "/sys/block/mm"*"/device/type" |
+            cut -d / -f 4
+    )
+    [ -z "$SDCARDS" ] && error "No SD cards found"
 
-	exit 0
+    # list USB devices
+    for i in $USBKEYS; do
+        USB_DEVICE_VENDOR=$(cat /sys/block/"$i"/device/vendor) ||
+            error "get DEVICE_VENDOR"
+        USB_DEVICE_NAME=$(cat /sys/block/"$i"/device/model) ||
+            error "get DEVICE_NAME"
+        USB_DEVICE_SIZE=$(lsblk -d -n -o SIZE /dev/"$i") ||
+            error "get DEVICE_SIZE"
+        echo "$i $USB_DEVICE_SIZE $USB_DEVICE_VENDOR$USB_DEVICE_NAME"
+    done
+
+    # list SD-card devices
+    for i in $SDCARDS; do
+        # shellcheck disable=SC2002
+        SD_DEVICE_SERIAL=$(cat /sys/block/"$i"/device/serial) ||
+            error "get DEVICE_VENDOR"
+        SD_DEVICE_SERIAL=$(printf " Serial: %d\n" "$SD_DEVICE_SERIAL") ||
+            error "get DEVICE_VENDOR"
+        SD_DEVICE_NAME=$(cat /sys/block/"$i"/device/name) ||
+            error "get DEVICE_NAME"
+        SD_DEVICE_SIZE=$(lsblk -d -n -o SIZE /dev/"$i") ||
+            error "get DEVICE_SIZE"
+        echo "$i $SD_DEVICE_SIZE $SD_DEVICE_NAME $SD_DEVICE_SERIAL"
+    done
+
+    exit 0
 fi
 
-if [ -z "${2}" ]; then
-	echo "You need to enter a target blockdevice, like /dev/sdx"
-	exit 1
-fi
+[ -z "$2" ] && error "You need to enter a target blockdevice, like /dev/sdx"
 
-FLASH_STORAGE="/dev/$2"
+readonly FLASH_STORAGE="/dev/$2"
 
 # install current users authorized_key to Debian Raspberry Pi
 if [ "$1" = "-k" ] || [ "$1" = "--ssh-key" ]; then
-	# mount
-	udisksctl mount -b "$FLASH_STORAGE""1"
-	wait
 
-	# shellcheck disable=SC2002
-	SD_PATH=$(cat /proc/mounts | grep "$FLASH_STORAGE" | awk '{print $2}')
-	CFG_FILE_DEBIAN="$SD_PATH/sysconf.txt"
-	CFG_FILE_RASPBIAN="$SD_PATH/config.txt"
-	SSHKEY=$(cat .ssh/id_rsa.pub || exit 1)
+    # check if already mounted
+    if grep -q "$FLASH_STORAGE" /proc/mounts; then
+        # unmount all partitions
+        udisksctl unmount -fb "$FLASH_STORAGE"?* || error "udisksctl unmount"
+        wait
+    fi
 
-	# debian
-	KEY_VAR="#root_authorized_key="
-	if grep -Fxq "$KEY_VAR" "$CFG_FILE_DEBIAN"; then
-		echo "Detected Debian, installing keys"
-		sed -i "s|$KEY_VAR|root_authorized_key=$SSHKEY|g" "$CFG_FILE_DEBIAN"
-	# raspbian
-	elif grep -Fxq "# http://rpf.io/configtxt" "$CFG_FILE_RASPBIAN"; then
-		echo "Detected Raspbian, enabling ssh with default credentials"
-		touch "$SD_PATH/ssh"
-		echo "Enable hdmi_force_hotplug"
-		sed -i "s|#hdmi_force_hotplug=1|hdmi_force_hotplug=1|g" \
-			"$CFG_FILE_RASPBIAN"
-	else
-		echo "Can't set key, already set?"
-	fi
+    # mount
+    case "$FLASH_STORAGE" in
+    /dev/mm*)
+        echo "Mounting flash $FLASH_STORAGE"
+        udisksctl mount -b "$FLASH_STORAGE""p1" || error "udisksctl mount"
+        ;;
+    /dev/*)
+        echo "Mounting USB $FLASH_STORAGE"
+        udisksctl mount -b "$FLASH_STORAGE""1" || error "udisksctl mount"
+        ;;
+    esac
 
-	# unmount everything
-	udisksctl unmount -b "$FLASH_STORAGE"?*
-	wait
+    wait
 
-	exit 0
+    # shellcheck disable=SC2002
+    SD_PATH=$(cat /proc/mounts | grep "$FLASH_STORAGE" | awk '{print $2}')
+    CFG_FILE_DEBIAN="$SD_PATH/sysconf.txt"
+    CFG_FILE_RASPBIAN="$SD_PATH/config.txt"
+    KEY_PATH="$PWD/.ssh/id_rsa.pub"
+    [ -f "$KEY_PATH" ] || error "No key found in $KEY_PATH, run ssh-keygen"
+    echo "Key is: $KEY_PATH"
+    SSHKEY=$(cat "$KEY_PATH" || error "$KEY_PATH not found")
+
+    # debian
+    KEY_VAR="#root_authorized_key="
+    if grep -Fxq "$KEY_VAR" "$CFG_FILE_DEBIAN"; then
+        echo "Detected Debian, installing keys"
+        sed -i "s|$KEY_VAR|root_authorized_key=$SSHKEY|g" "$CFG_FILE_DEBIAN"
+    # raspbian
+    elif grep -Fxq "# http://rpf.io/configtxt" "$CFG_FILE_RASPBIAN"; then
+        echo "Detected Raspbian, enabling ssh with default credentials"
+        touch "$SD_PATH/ssh"
+        echo "Enable hdmi_force_hotplug"
+        sed -i "s|#hdmi_force_hotplug=1|hdmi_force_hotplug=1|g" \
+            "$CFG_FILE_RASPBIAN"
+    else
+        echo "Can't set key, already set?"
+    fi
+
+    sync
+
+    # unmount everything
+    udisksctl unmount -b "$FLASH_STORAGE"?* || error "udisksctl unmount"
+    wait
+
+    exit 0
 fi
 
 # must run as root
-if [ "$(id -u)" -ne 0 ]; then
-	echo 'This script must be run as root!' >&2
-	exit 1
+[ "$(id -u)" -ne 0 ] && error "This script must be run as root!"
+
+readonly ARCHIVE="$1"
+
+# check if already mounted
+if grep -q "$FLASH_STORAGE" /proc/mounts; then
+    # unmount all partitions
+    udisksctl unmount -fb "$FLASH_STORAGE"?* || error "udisksctl unmount"
+    wait
 fi
 
-ARCHIVE=$1
-
-# unmount all partitions
-udisksctl unmount -fb "$FLASH_STORAGE"?*
-wait
-
 # find compression type
-FILE_TYPE=$(file "$ARCHIVE")
+FILE_TYPE=$(file -L "$ARCHIVE")
+echo "File type: $FILE_TYPE"
 
 # extract and flash
 if echo "$FILE_TYPE" | grep -q "XZ compressed"; then
-	unxz -v --stdout --threads=0 "$ARCHIVE" |
-		dd of="$FLASH_STORAGE" bs=1M status=progress || exit 1
+    unxz -v --stdout --threads=0 "$ARCHIVE" |
+        dd of="$FLASH_STORAGE" bs=1M status=progress ||
+        error "extracting file to flashstorage"
 elif echo "$FILE_TYPE" | grep -q "Zip archive"; then
-	unzip -p "$ARCHIVE" |
-		dd of="$FLASH_STORAGE" bs=1M status=progress || exit 1
+    unzip -p "$ARCHIVE" |
+        dd of="$FLASH_STORAGE" bs=1M status=progress ||
+        error "extracting file to flashstorage"
+else
+    error "Unknown file type: $FILE_TYPE"
 fi
 
-udisksctl unmount -b "$FLASH_STORAGE"?*
-wait
+sync
+
+# check if already mounted
+if grep -q "$FLASH_STORAGE" /proc/mounts; then
+    # unmount all partitions
+    udisksctl unmount -fb "$FLASH_STORAGE"?* || error "udisksctl unmount"
+    wait
+fi

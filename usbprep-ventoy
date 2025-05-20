@@ -183,13 +183,23 @@ calculate_space() {
 }
 
 copy_files() {
-    local DEST_FILE
+    local DEST
+
+    echo "--- Copying files..."
 
     while read -r line; do
-        DEST_FILE=$(basename "$line")
-        rsync -tP "$line" "$DEVICE_PATH/$DEST_FILE" ||
-            error "Failed to copy $line"
-        sync
+        DEST=$(basename "$line")
+        DEST="$DEVICE_PATH/$DEST"
+        if [ -d "$line" ]; then
+            echo "Copying folder $line to $DEST"
+            rsync -tFrL "$line/" "$DEST" --delete ||
+                error "Failed to copy $line"
+        else
+            echo "Copying $line to $DEST"
+            rsync -tPF "$line" "$DEST" ||
+                error "Failed to copy $line"
+            sync
+        fi
     done <"$LIST_TO_CP"
 }
 
@@ -217,12 +227,28 @@ curate_fastpkg_images() {
 
 curate_custom_images() {
     echo "--- Curating custom images..."
+    local LINK_SOURCE
 
     while read -r line; do
         if echo "$line" | grep -q '/'; then
-            [ -f "$line" ] || error "Failed to find disk image: $line"
-            echo "add to copy list: $line"
-            echo "$line" >>"$LIST_TO_CP"
+            # replace $HOME string with actual path
+            CURRENT_LINE=$(echo "$line" | sed "s@\$HOME@$HOME@")
+            # parsed line
+            # ignore comments
+            if echo "$CURRENT_LINE" | grep -q '^#'; then
+                :
+            elif [ -L "$CURRENT_LINE" ]; then
+                LINK_SOURCE=$(readlink -f "$CURRENT_LINE")
+                echo "$LINK_SOURCE" >>"$LIST_TO_CP"
+            elif [ -f "$CURRENT_LINE" ]; then
+                echo "add to copy list: $CURRENT_LINE"
+                echo "$CURRENT_LINE" >>"$LIST_TO_CP"
+            elif [ -d "$CURRENT_LINE" ]; then
+                echo "add folder to copy list: $CURRENT_LINE"
+                echo "$CURRENT_LINE" >>"$LIST_TO_CP"
+            else
+                error "Failed to find disk image: $CURRENT_LINE"
+            fi
         else
             echo "add to download list: $line"
             echo "$line" >>"$LIST_TO_DL"
@@ -315,7 +341,7 @@ if [ -f "$VENTOY_JSON" ]; then
     echo "Copy Ventoy template files..."
     rm -rf "$DEVICE_PATH/.Trash"*
     rm -f "$DEVICE_PATH/ventoy/.*"
-    rsync -trp "$DIR_CFG/" "$DEVICE_PATH/ventoy" --exclude=".*" --delete ||
+    rsync -tFrL "$DIR_CFG/" "$DEVICE_PATH/ventoy" --exclude=".*" --delete ||
         error "Failed to copy $DIR_CFG to $DEVICE_PATH"
 else
     echo "skip copy Ventoy templates, no $VENTOY_JSON found"
